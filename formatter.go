@@ -133,12 +133,21 @@ func (f *Formatter) errorOrigin() (stack.Call, error) {
 func (f *Formatter) Format(e *logrus.Entry) ([]byte, error) {
 	severity := levelsToSeverity[e.Level]
 
-	ee := entry{
+	data := make(map[string]interface{}, len(e.Data))
+	for k, v := range e.Data {
+		switch t := v.(type) {
+		case error:
+			data[k] = t.Error()
+		default:
+			data[k] = v
+		}
+	}
 
+	ee := entry{
 		Message:  e.Message,
 		Severity: severity,
 		Context: &context{
-			Data: e.Data,
+			Data: data,
 		},
 	}
 
@@ -156,19 +165,19 @@ func (f *Formatter) Format(e *logrus.Entry) ([]byte, error) {
 		// When using WithError(), the error is sent separately, but Error
 		// Reporting expects it to be a part of the message so we append it
 		// instead.
-		if err, ok := ee.Context.Data["error"]; ok {
+		if err, ok := data["error"]; ok {
 			ee.Message = fmt.Sprintf("%s: %s", e.Message, err)
-			delete(ee.Context.Data, "error")
+			delete(data, "error")
 		} else {
 			ee.Message = e.Message
 		}
 
 		// As a convenience, when using supplying the httpRequest field, it
 		// gets special care.
-		if reqData, ok := ee.Context.Data["httpRequest"]; ok {
+		if reqData, ok := data["httpRequest"]; ok {
 			if req, ok := reqData.(map[string]interface{}); ok {
 				ee.Context.HTTPRequest = req
-				delete(ee.Context.Data, "httpRequest")
+				delete(data, "httpRequest")
 			}
 		}
 
