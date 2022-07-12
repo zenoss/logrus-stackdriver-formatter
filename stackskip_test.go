@@ -6,9 +6,9 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/TV4/logrus-stackdriver-formatter/test"
 	"github.com/kr/pretty"
 	"github.com/sirupsen/logrus"
+	"github.com/zenoss/logrus-stackdriver-formatter/test"
 )
 
 func TestStackSkip(t *testing.T) {
@@ -19,7 +19,7 @@ func TestStackSkip(t *testing.T) {
 	logger.Formatter = NewFormatter(
 		WithService("test"),
 		WithVersion("0.1"),
-		WithStackSkip("github.com/TV4/logrus-stackdriver-formatter/test"),
+		WithStackSkip("github.com/zenoss/logrus-stackdriver-formatter/test"),
 	)
 
 	mylog := test.LogWrapper{
@@ -29,7 +29,7 @@ func TestStackSkip(t *testing.T) {
 	mylog.Error("my log entry")
 
 	var got map[string]interface{}
-	json.Unmarshal(out.Bytes(), &got)
+	_ = json.Unmarshal(out.Bytes(), &got)
 
 	want := map[string]interface{}{
 		"severity": "ERROR",
@@ -40,7 +40,7 @@ func TestStackSkip(t *testing.T) {
 		},
 		"context": map[string]interface{}{
 			"reportLocation": map[string]interface{}{
-				"filePath":     "github.com/TV4/logrus-stackdriver-formatter/stackskip_test.go",
+				"filePath":     "github.com/zenoss/logrus-stackdriver-formatter/stackskip_test.go",
 				"lineNumber":   29.0,
 				"functionName": "TestStackSkip",
 			},
