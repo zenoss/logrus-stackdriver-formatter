@@ -1,11 +1,11 @@
 module github.com/zenoss/logrus-stackdriver-formatter
 
-go 1.24
+go 1.27
 
 require (
 	github.com/go-stack/stack v1.8.1
 	github.com/kr/pretty v0.3.1
-	github.com/sirupsen/logrus v1.9.3
+	github.com/sirupsen/logrus v1.10.2
 )
 
 require (
