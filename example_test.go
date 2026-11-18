@@ -8,7 +8,7 @@ import (
 	stackdriver "github.com/zenoss/logrus-stackdriver-formatter"
 )
 
-func ExampleLogError() {
+func Example() {
 	logger := logrus.New()
 	logger.Out = os.Stdout
 	logger.Formatter = stackdriver.NewFormatter(
