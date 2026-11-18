@@ -1,7 +1,8 @@
 package stackdriver
 
 import (
-	"encoding/json"
+	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"fmt"
 	"path"
 	"runtime"
@@ -41,22 +42,22 @@ type serviceContext struct {
 
 type reportLocation struct {
 	FilePath     string `json:"filePath,omitempty"`
-	LineNumber   int    `json:"lineNumber,omitempty"`
+	LineNumber   int    `json:"lineNumber,omitzero"`
 	FunctionName string `json:"functionName,omitempty"`
 }
 
 type context struct {
 	Data           map[string]any  `json:"data,omitempty"`
-	ReportLocation *reportLocation `json:"reportLocation,omitempty"`
+	ReportLocation *reportLocation `json:"reportLocation,omitzero"`
 	HTTPRequest    map[string]any  `json:"httpRequest,omitempty"`
 }
 
 type entry struct {
 	Timestamp      string          `json:"timestamp,omitempty"`
-	ServiceContext *serviceContext `json:"serviceContext,omitempty"`
+	ServiceContext *serviceContext `json:"serviceContext,omitzero"`
 	Message        string          `json:"message,omitempty"`
 	Severity       severity        `json:"severity,omitempty"`
-	Context        *context        `json:"context,omitempty"`
+	Context        *context        `json:"context,omitzero"`
 }
 
 // Formatter implements Stackdriver formatting for logrus.
@@ -233,7 +234,7 @@ func (f *Formatter) Format(e *logrus.Entry) ([]byte, error) {
 		}
 	}
 
-	b, err := json.Marshal(ee)
+	b, err := json.Marshal(ee, json.Deterministic(true), jsontext.AllowInvalidUTF8(true))
 	if err != nil {
 		return nil, fmt.Errorf("marshal log entry: %w", err)
 	}

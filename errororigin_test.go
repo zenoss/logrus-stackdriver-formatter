@@ -2,7 +2,7 @@ package stackdriver
 
 import (
 	"bytes"
-	"encoding/json"
+	"encoding/json/v2"
 	"runtime"
 	"strings"
 	"testing"

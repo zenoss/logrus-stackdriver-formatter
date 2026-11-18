@@ -2,11 +2,13 @@ package stackdriver
 
 import (
 	"bytes"
-	"encoding/json"
+	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"errors"
 	"reflect"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/sirupsen/logrus"
 )
@@ -158,4 +160,64 @@ var formatterTests = []struct {
 			},
 		},
 	},
+}
+
+func TestFormatterInvalidUTF8(t *testing.T) {
+	skipTimestamp = true
+
+	f := NewFormatter()
+	entry := &logrus.Entry{
+		Level:   logrus.InfoLevel,
+		Message: "bad \xff byte",
+		Data:    logrus.Fields{"k\xfe": "v\xff\xff", "nested": []any{"\xfa"}},
+	}
+
+	b, err := f.Format(entry)
+	if err != nil {
+		t.Fatalf("Format() error = %v; want the entry written with U+FFFD", err)
+	}
+	if !utf8.Valid(b) {
+		t.Errorf("output %q is not valid UTF-8", b)
+	}
+	if !jsontext.Value(bytes.TrimSpace(b)).IsValid() {
+		t.Errorf("output %q is not a valid JSON value", b)
+	}
+
+	var got map[string]any
+	err = json.Unmarshal(b, &got)
+	if err != nil {
+		t.Fatalf("unmarshal %q: %v", b, err)
+	}
+	if got["message"] != "bad � byte" {
+		t.Errorf("message = %q; want %q", got["message"], "bad � byte")
+	}
+	ctx := got["context"].(map[string]any)["data"].(map[string]any)
+	if ctx["k�"] != "v��" {
+		t.Errorf("data = %v; want key and value with one U+FFFD per invalid byte", ctx)
+	}
+}
+
+func TestFormatterDeterministicKeys(t *testing.T) {
+	skipTimestamp = true
+
+	f := NewFormatter()
+	entry := &logrus.Entry{
+		Level:   logrus.InfoLevel,
+		Message: "keys",
+		Data:    logrus.Fields{"a": 1, "b": 2, "c": 3, "d": 4, "e": 5, "f": 6, "g": 7, "h": 8},
+	}
+
+	first, err := f.Format(entry)
+	if err != nil {
+		t.Fatalf("Format() error = %v", err)
+	}
+	for i := range 50 {
+		again, err := f.Format(entry)
+		if err != nil {
+			t.Fatalf("Format() run %d error = %v", i, err)
+		}
+		if !bytes.Equal(first, again) {
+			t.Fatalf("run %d output %q differs from %q", i, again, first)
+		}
+	}
 }
