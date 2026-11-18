@@ -5,9 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
-
-	"github.com/kr/pretty"
 
 	"github.com/sirupsen/logrus"
 )
@@ -30,10 +29,39 @@ func TestFormatter(t *testing.T) {
 		var got map[string]interface{}
 		_ = json.Unmarshal(out.Bytes(), &got)
 
+		dropVolatileReportLocation(t, got)
+
 		if !reflect.DeepEqual(got, tt.out) {
-			t.Errorf("unexpected output = %# v; want = %# v", pretty.Formatter(got), pretty.Formatter(tt.out))
+			t.Errorf("unexpected output = %#v; want = %#v", got, tt.out)
 		}
 	}
+}
+
+// dropVolatileReportLocation verifies the lineNumber and functionName in the
+// reportLocation of entry, then removes them so the rest of the entry can be
+// compared exactly. The function name is a closure name whose exact form
+// depends on the Go toolchain ("init.func2" or "glob..func2"), so it is only
+// checked to contain "func". The line number must be positive.
+func dropVolatileReportLocation(t *testing.T, entry map[string]interface{}) {
+	t.Helper()
+
+	ctx, _ := entry["context"].(map[string]interface{})
+	rl, ok := ctx["reportLocation"].(map[string]interface{})
+	if !ok {
+		return
+	}
+
+	fn, _ := rl["functionName"].(string)
+	if !strings.Contains(fn, "func") {
+		t.Errorf("reportLocation.functionName = %q; want it to contain %q", fn, "func")
+	}
+
+	if line, _ := rl["lineNumber"].(float64); line < 1 {
+		t.Errorf("reportLocation.lineNumber = %v; want a positive line number", line)
+	}
+
+	delete(rl, "lineNumber")
+	delete(rl, "functionName")
 }
 
 var formatterTests = []struct {
@@ -70,9 +98,7 @@ var formatterTests = []struct {
 					"foo": "bar",
 				},
 				"reportLocation": map[string]interface{}{
-					"filePath":     "github.com/zenoss/logrus-stackdriver-formatter/formatter_test.go",
-					"lineNumber":   59.0,
-					"functionName": "glob..func2",
+					"filePath": "github.com/zenoss/logrus-stackdriver-formatter/formatter_test.go",
 				},
 			},
 		},
@@ -96,9 +122,7 @@ var formatterTests = []struct {
 					"foo": "bar",
 				},
 				"reportLocation": map[string]interface{}{
-					"filePath":     "github.com/zenoss/logrus-stackdriver-formatter/formatter_test.go",
-					"lineNumber":   85.0,
-					"functionName": "glob..func3",
+					"filePath": "github.com/zenoss/logrus-stackdriver-formatter/formatter_test.go",
 				},
 			},
 		},
@@ -129,9 +153,7 @@ var formatterTests = []struct {
 					"method": "GET",
 				},
 				"reportLocation": map[string]interface{}{
-					"filePath":     "github.com/zenoss/logrus-stackdriver-formatter/formatter_test.go",
-					"lineNumber":   115.0,
-					"functionName": "glob..func4",
+					"filePath": "github.com/zenoss/logrus-stackdriver-formatter/formatter_test.go",
 				},
 			},
 		},

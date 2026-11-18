@@ -4,9 +4,9 @@ import (
 	"bytes"
 	"encoding/json"
 	"reflect"
+	"runtime"
 	"testing"
 
-	"github.com/kr/pretty"
 	"github.com/sirupsen/logrus"
 	"github.com/zenoss/logrus-stackdriver-formatter/test"
 )
@@ -26,7 +26,8 @@ func TestStackSkip(t *testing.T) {
 		Logger: logger,
 	}
 
-	mylog.Error("my log entry")
+	_, _, logLine, _ := runtime.Caller(0)
+	mylog.Error("my log entry") // must be on the line right after logLine
 
 	var got map[string]interface{}
 	_ = json.Unmarshal(out.Bytes(), &got)
@@ -41,13 +42,13 @@ func TestStackSkip(t *testing.T) {
 		"context": map[string]interface{}{
 			"reportLocation": map[string]interface{}{
 				"filePath":     "github.com/zenoss/logrus-stackdriver-formatter/stackskip_test.go",
-				"lineNumber":   29.0,
+				"lineNumber":   float64(logLine + 1),
 				"functionName": "TestStackSkip",
 			},
 		},
 	}
 
 	if !reflect.DeepEqual(got, want) {
-		t.Errorf("unexpected output = %# v; want = %# v", pretty.Formatter(got), pretty.Formatter(want))
+		t.Errorf("unexpected output = %#v; want = %#v", got, want)
 	}
 }
