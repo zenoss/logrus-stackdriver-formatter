@@ -26,7 +26,7 @@ func TestFormatter(t *testing.T) {
 
 		tt.run(logger)
 
-		var got map[string]interface{}
+		var got map[string]any
 		_ = json.Unmarshal(out.Bytes(), &got)
 
 		dropVolatileReportLocation(t, got)
@@ -42,11 +42,11 @@ func TestFormatter(t *testing.T) {
 // compared exactly. The function name is a closure name whose exact form
 // depends on the Go toolchain ("init.func2" or "glob..func2"), so it is only
 // checked to contain "func". The line number must be positive.
-func dropVolatileReportLocation(t *testing.T, entry map[string]interface{}) {
+func dropVolatileReportLocation(t *testing.T, entry map[string]any) {
 	t.Helper()
 
-	ctx, _ := entry["context"].(map[string]interface{})
-	rl, ok := ctx["reportLocation"].(map[string]interface{})
+	ctx, _ := entry["context"].(map[string]any)
+	rl, ok := ctx["reportLocation"].(map[string]any)
 	if !ok {
 		return
 	}
@@ -66,17 +66,17 @@ func dropVolatileReportLocation(t *testing.T, entry map[string]interface{}) {
 
 var formatterTests = []struct {
 	run func(*logrus.Logger)
-	out map[string]interface{}
+	out map[string]any
 }{
 	{
 		run: func(logger *logrus.Logger) {
 			logger.WithField("foo", "bar").Info("my log entry")
 		},
-		out: map[string]interface{}{
+		out: map[string]any{
 			"severity": "INFO",
 			"message":  "my log entry",
-			"context": map[string]interface{}{
-				"data": map[string]interface{}{
+			"context": map[string]any{
+				"data": map[string]any{
 					"foo": "bar",
 				},
 			},
@@ -86,18 +86,18 @@ var formatterTests = []struct {
 		run: func(logger *logrus.Logger) {
 			logger.WithField("foo", "bar").Error("my log entry")
 		},
-		out: map[string]interface{}{
+		out: map[string]any{
 			"severity": "ERROR",
 			"message":  "my log entry",
-			"serviceContext": map[string]interface{}{
+			"serviceContext": map[string]any{
 				"service": "test",
 				"version": "0.1",
 			},
-			"context": map[string]interface{}{
-				"data": map[string]interface{}{
+			"context": map[string]any{
+				"data": map[string]any{
 					"foo": "bar",
 				},
-				"reportLocation": map[string]interface{}{
+				"reportLocation": map[string]any{
 					"filePath": "github.com/zenoss/logrus-stackdriver-formatter/formatter_test.go",
 				},
 			},
@@ -110,18 +110,18 @@ var formatterTests = []struct {
 				WithError(errors.New("test error")).
 				Error("my log entry")
 		},
-		out: map[string]interface{}{
+		out: map[string]any{
 			"severity": "ERROR",
 			"message":  "my log entry: test error",
-			"serviceContext": map[string]interface{}{
+			"serviceContext": map[string]any{
 				"service": "test",
 				"version": "0.1",
 			},
-			"context": map[string]interface{}{
-				"data": map[string]interface{}{
+			"context": map[string]any{
+				"data": map[string]any{
 					"foo": "bar",
 				},
-				"reportLocation": map[string]interface{}{
+				"reportLocation": map[string]any{
 					"filePath": "github.com/zenoss/logrus-stackdriver-formatter/formatter_test.go",
 				},
 			},
@@ -132,27 +132,27 @@ var formatterTests = []struct {
 			logger.
 				WithFields(logrus.Fields{
 					"foo": "bar",
-					"httpRequest": map[string]interface{}{
+					"httpRequest": map[string]any{
 						"method": "GET",
 					},
 				}).
 				Error("my log entry")
 		},
-		out: map[string]interface{}{
+		out: map[string]any{
 			"severity": "ERROR",
 			"message":  "my log entry",
-			"serviceContext": map[string]interface{}{
+			"serviceContext": map[string]any{
 				"service": "test",
 				"version": "0.1",
 			},
-			"context": map[string]interface{}{
-				"data": map[string]interface{}{
+			"context": map[string]any{
+				"data": map[string]any{
 					"foo": "bar",
 				},
-				"httpRequest": map[string]interface{}{
+				"httpRequest": map[string]any{
 					"method": "GET",
 				},
-				"reportLocation": map[string]interface{}{
+				"reportLocation": map[string]any{
 					"filePath": "github.com/zenoss/logrus-stackdriver-formatter/formatter_test.go",
 				},
 			},

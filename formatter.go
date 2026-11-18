@@ -3,11 +3,12 @@ package stackdriver
 import (
 	"encoding/json"
 	"fmt"
-	"strconv"
+	"path"
+	"runtime"
+	"slices"
 	"strings"
 	"time"
 
-	"github.com/go-stack/stack"
 	"github.com/sirupsen/logrus"
 )
 
@@ -45,9 +46,9 @@ type reportLocation struct {
 }
 
 type context struct {
-	Data           map[string]interface{} `json:"data,omitempty"`
-	ReportLocation *reportLocation        `json:"reportLocation,omitempty"`
-	HTTPRequest    map[string]interface{} `json:"httpRequest,omitempty"`
+	Data           map[string]any  `json:"data,omitempty"`
+	ReportLocation *reportLocation `json:"reportLocation,omitempty"`
+	HTTPRequest    map[string]any  `json:"httpRequest,omitempty"`
 }
 
 type entry struct {
@@ -102,38 +103,78 @@ func NewFormatter(options ...Option) *Formatter {
 	return &fmtr
 }
 
-func (f *Formatter) errorOrigin() (stack.Call, error) {
+// errorOrigin returns the first frame above Format whose package is not in
+// f.StackSkip. The boolean is false when every frame is skipped.
+func (f *Formatter) errorOrigin() (runtime.Frame, bool) {
 	skip := func(pkg string) bool {
-		for _, skip := range f.StackSkip {
-			if pkg == skip {
-				return true
-			}
-		}
-		return false
+		return slices.Contains(f.StackSkip, pkg)
 	}
 
-	// We start at 2 to skip this call and our caller's call.
-	for i := 2; ; i++ {
-		c := stack.Caller(i)
-		// ErrNoFunc indicates we're over traversing the stack.
-		if _, err := c.MarshalText(); err != nil {
-			return stack.Call{}, nil
+	// Start with room for 32 program counters and double the buffer until the
+	// whole stack fits, so deep stacks are still walked to the end.
+	pcs := make([]uintptr, 32)
+	for {
+		// Skip runtime.Callers, errorOrigin and Format.
+		n := runtime.Callers(3, pcs)
+		frames := runtime.CallersFrames(pcs[:n])
+		for {
+			frame, more := frames.Next()
+			if frame.Function == "" {
+				break
+			}
+			pkg := packagePath(frame.Function)
+			// Remove vendoring from package path. This only applies in GOPATH
+			// mode (GO111MODULE=off), where vendored packages keep their
+			// "<root>/vendor/" prefix in runtime function names, so
+			// "example.com/app/vendor/lib" must match a StackSkip entry of
+			// "lib". In module mode, a vendored package's function name is
+			// already its import path, so this is a no-op.
+			parts := strings.SplitN(pkg, "/vendor/", 2)
+			pkg = parts[len(parts)-1]
+			if !skip(pkg) {
+				return frame, true
+			}
+			if !more {
+				break
+			}
 		}
-		pkg := fmt.Sprintf("%+k", c)
-		// Remove vendoring from package path.
-		parts := strings.SplitN(pkg, "/vendor/", 2)
-		pkg = parts[len(parts)-1]
-		if !skip(pkg) {
-			return c, nil
+		if n < len(pcs) {
+			return runtime.Frame{}, false
 		}
+		pcs = make([]uintptr, 2*len(pcs))
 	}
+}
+
+// packagePath returns the import path of the package that declares function,
+// which is the form runtime.Frame.Function uses, for example
+// "github.com/a/b" for "github.com/a/b.(*T).M". Type arguments of generic
+// functions are ignored, since they may contain slashes.
+func packagePath(function string) string {
+	if i := strings.IndexByte(function, '['); i >= 0 {
+		function = function[:i]
+	}
+	start := strings.LastIndexByte(function, '/') + 1
+	if dot := strings.IndexByte(function[start:], '.'); dot >= 0 {
+		return function[:start+dot]
+	}
+	return function
+}
+
+// functionName returns function without its package path, for example
+// "init.func2" for "github.com/a/b.init.func2".
+func functionName(function string) string {
+	pkg := packagePath(function)
+	if len(pkg) >= len(function) {
+		return ""
+	}
+	return function[len(pkg)+1:]
 }
 
 // Format formats a logrus entry according to the Stackdriver specifications.
 func (f *Formatter) Format(e *logrus.Entry) ([]byte, error) {
 	severity := levelsToSeverity[e.Level]
 
-	data := make(map[string]interface{}, len(e.Data))
+	data := make(map[string]any, len(e.Data))
 	for k, v := range e.Data {
 		switch t := v.(type) {
 		case error:
@@ -175,27 +216,26 @@ func (f *Formatter) Format(e *logrus.Entry) ([]byte, error) {
 		// As a convenience, when using supplying the httpRequest field, it
 		// gets special care.
 		if reqData, ok := data["httpRequest"]; ok {
-			if req, ok := reqData.(map[string]interface{}); ok {
+			if req, ok := reqData.(map[string]any); ok {
 				ee.Context.HTTPRequest = req
 				delete(data, "httpRequest")
 			}
 		}
 
-		// Extract report location from call stack.
-		if c, err := f.errorOrigin(); err == nil {
-			lineNumber, _ := strconv.ParseInt(fmt.Sprintf("%d", c), 10, 64)
-
+		// Extract report location from call stack. External test packages
+		// ("pkg_test") are reported under the package they test.
+		if frame, ok := f.errorOrigin(); ok {
 			ee.Context.ReportLocation = &reportLocation{
-				FilePath:     fmt.Sprintf("%+s", c),
-				LineNumber:   int(lineNumber),
-				FunctionName: fmt.Sprintf("%n", c),
+				FilePath:     strings.TrimSuffix(packagePath(frame.Function), "_test") + "/" + path.Base(frame.File),
+				LineNumber:   frame.Line,
+				FunctionName: functionName(frame.Function),
 			}
 		}
 	}
 
 	b, err := json.Marshal(ee)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("marshal log entry: %w", err)
 	}
 
 	return append(b, '\n'), nil
