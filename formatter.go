@@ -87,25 +87,22 @@ func marshalNonFinite(enc *jsontext.Encoder, f float64) error {
 	return errors.ErrUnsupported
 }
 
-// failingDataField reports the data key named by a marshal error, and the
+// failingFieldFromSemanticError reports the data key named by a marshal error, and the
 // Go type that could not be marshaled. It returns false when the error is not
 // about a top-level field of data.
-func failingDataField(err error, data map[string]any) (key, goType string, ok bool) {
-	var se *json.SemanticError
-	if !errors.As(err, &se) {
-		return "", "", false
-	}
-
+func failingFieldFromSemanticError(se *json.SemanticError, data map[string]any) (key, goType string, ok bool) {
 	// Walk up from the failing value to the field directly under data.
 	// LastToken returns the key unescaped.
 	dataPointer := jsontext.Pointer("/context/data")
 	if se.JSONPointer == dataPointer || !dataPointer.Contains(se.JSONPointer) {
 		return "", "", false
 	}
+
 	field := se.JSONPointer
 	for field.Parent() != dataPointer {
 		field = field.Parent()
 	}
+
 	key = field.LastToken()
 	if _, ok := data[key]; !ok {
 		return "", "", false
@@ -115,6 +112,7 @@ func failingDataField(err error, data map[string]any) (key, goType string, ok bo
 	if se.GoType != nil {
 		goType = se.GoType.String()
 	}
+
 	return key, goType, true
 }
 
@@ -333,25 +331,42 @@ func (f *Formatter) Format(e *logrus.Entry) ([]byte, error) {
 		}
 	}
 
-	b, err := json.Marshal(ee, marshalOptions)
-	for range maxUnsupportedFields {
-		if err == nil {
-			break
-		}
-		key, goType, ok := failingDataField(err, data)
-		if !ok {
-			break
-		}
-		if ee.Context.UnsupportedFields == nil {
-			ee.Context.UnsupportedFields = make(map[string]string)
-		}
-		ee.Context.UnsupportedFields[key] = goType
-		delete(data, key)
+	var err error
+	// One initial attempt plus up to maxUnsupportedFields retries.
+	for range maxUnsupportedFields + 1 {
+		var b []byte
+
 		b, err = json.Marshal(ee, marshalOptions)
+		if err != nil {
+			if handleSemanticError(err, &ee) {
+				continue
+			}
+			return nil, fmt.Errorf("marshal log entry: %w", err)
+		}
+
+		return append(b, '\n'), nil
 	}
-	if err != nil {
-		return nil, fmt.Errorf("marshal log entry: %w", err)
+	return nil, fmt.Errorf("marshal log entry: more than %d unsupported fields: %w", maxUnsupportedFields, err)
+}
+
+// handleSemanticError moves the field that failed to marshal from ee's data to
+// its unsupported fields. It reports whether a field was dropped, in which case
+// the caller should retry marshaling.
+func handleSemanticError(err error, ee *entry) bool {
+	se, ok := errors.AsType[*json.SemanticError](err)
+	if !ok {
+		return false
 	}
 
-	return append(b, '\n'), nil
+	key, goType, ok := failingFieldFromSemanticError(se, ee.Context.Data)
+	if !ok {
+		return false
+	}
+
+	if ee.Context.UnsupportedFields == nil {
+		ee.Context.UnsupportedFields = make(map[string]string)
+	}
+	ee.Context.UnsupportedFields[key] = goType
+	delete(ee.Context.Data, key)
+	return true
 }
