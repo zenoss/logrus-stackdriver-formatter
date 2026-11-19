@@ -8,7 +8,7 @@ import (
 	stackdriver "github.com/zenoss/logrus-stackdriver-formatter"
 )
 
-func ExampleLogError() {
+func Example() {
 	logger := logrus.New()
 	logger.Out = os.Stdout
 	logger.Formatter = stackdriver.NewFormatter(
@@ -25,5 +25,5 @@ func ExampleLogError() {
 
 	// Output:
 	// {"message":"application up and running","severity":"INFO","context":{}}
-	// {"serviceContext":{"service":"test-service","version":"v0.1.0"},"message":"unable to parse integer: strconv.ParseInt: parsing \"text\": invalid syntax","severity":"ERROR","context":{"reportLocation":{"filePath":"github.com/zenoss/logrus-stackdriver-formatter/example_test.go","lineNumber":23,"functionName":"ExampleLogError"}}}
+	// {"serviceContext":{"service":"test-service","version":"v0.1.0"},"message":"unable to parse integer: strconv.ParseInt: parsing \"text\": invalid syntax","severity":"ERROR","context":{"reportLocation":{"filePath":"github.com/zenoss/logrus-stackdriver-formatter/example_test.go","lineNumber":23,"functionName":"Example"}}}
 }

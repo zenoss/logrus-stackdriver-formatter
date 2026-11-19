@@ -24,7 +24,7 @@ var log = logrus.New()
 
 func init() {
     log.Formatter = stackdriver.NewFormatter(
-        stackdriver.WithService("your-service"), 
+        stackdriver.WithService("your-service"),
         stackdriver.WithVersion("v0.1.0"),
     )
     log.Level = logrus.DebugLevel
