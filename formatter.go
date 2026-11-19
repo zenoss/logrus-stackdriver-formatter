@@ -1,19 +1,120 @@
 package stackdriver
 
 import (
+	jsonv1 "encoding/json"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
+	"errors"
 	"fmt"
+	"maps"
+	"math"
 	"path"
 	"runtime"
 	"slices"
 	"strings"
 	"time"
+	"unsafe"
 
 	"github.com/sirupsen/logrus"
 )
 
 var skipTimestamp bool
+
+// marshalOptions are the encoding/json/v2 options used to write log entries.
+// Map keys are sorted so output is stable, and invalid UTF-8 is replaced
+// with U+FFFD instead of failing the entry.
+//
+// encoding/json/v2 has no default representation for time.Duration and
+// fails to marshal it, which would drop the whole log entry. Durations are
+// written as integer nanoseconds, as encoding/json (v1) did, so existing
+// log consumers keep working.
+var marshalOptions = json.JoinOptions(
+	json.Deterministic(true),
+	jsontext.AllowInvalidUTF8(true),
+	jsonv1.FormatDurationAsNano(true),
+	json.WithMarshalers(logMarshalers),
+)
+
+// maxUnsupportedFields bounds how many fields Format drops from one record
+// because they cannot be marshaled.
+const maxUnsupportedFields = 8
+
+// logMarshalers write values that encoding/json/v2 rejects, so one such value
+// does not fail the whole record. Each entry handles one type; chan and func
+// types have no finite list, so they are dropped by Format instead.
+var logMarshalers = json.JoinMarshalers(
+	// Errors are written as their message, as Format already does for
+	// top-level errors.
+	json.MarshalToFunc(func(enc *jsontext.Encoder, err error) error {
+		return enc.WriteToken(jsontext.String(err.Error()))
+	}),
+	json.MarshalToFunc(func(enc *jsontext.Encoder, loc *time.Location) error {
+		return enc.WriteToken(jsontext.String(loc.String()))
+	}),
+	// Non-finite floats are written as strings. Other floats fall through
+	// to the default encoding.
+	json.MarshalToFunc(func(enc *jsontext.Encoder, f float64) error {
+		return marshalNonFinite(enc, f)
+	}),
+	json.MarshalToFunc(func(enc *jsontext.Encoder, f float32) error {
+		return marshalNonFinite(enc, float64(f))
+	}),
+	json.MarshalToFunc(func(enc *jsontext.Encoder, c complex128) error {
+		return enc.WriteToken(jsontext.String(fmt.Sprint(c)))
+	}),
+	json.MarshalToFunc(func(enc *jsontext.Encoder, c complex64) error {
+		return enc.WriteToken(jsontext.String(fmt.Sprint(c)))
+	}),
+	json.MarshalToFunc(func(enc *jsontext.Encoder, p unsafe.Pointer) error {
+		if p == nil {
+			return enc.WriteToken(jsontext.Null)
+		}
+		return enc.WriteToken(jsontext.String(fmt.Sprintf("%p", p)))
+	}),
+)
+
+// marshalNonFinite writes NaN and infinities as strings. For finite values it
+// returns errors.ErrUnsupported without writing, so the default encoding is used.
+func marshalNonFinite(enc *jsontext.Encoder, f float64) error {
+	switch {
+	case math.IsNaN(f):
+		return enc.WriteToken(jsontext.String("NaN"))
+	case math.IsInf(f, 1):
+		return enc.WriteToken(jsontext.String("+Inf"))
+	case math.IsInf(f, -1):
+		return enc.WriteToken(jsontext.String("-Inf"))
+	}
+	return errors.ErrUnsupported
+}
+
+// failingFieldFromSemanticError reports the data key named by a marshal error, and the
+// Go type that could not be marshaled. It returns false when the error is not
+// about a top-level field of data.
+func failingFieldFromSemanticError(se *json.SemanticError, data map[string]any) (key, goType string, ok bool) {
+	// Walk up from the failing value to the field directly under data.
+	// LastToken returns the key unescaped.
+	dataPointer := jsontext.Pointer("/context/data")
+	if se.JSONPointer == dataPointer || !dataPointer.Contains(se.JSONPointer) {
+		return "", "", false
+	}
+
+	field := se.JSONPointer
+	for field.Parent() != dataPointer {
+		field = field.Parent()
+	}
+
+	key = field.LastToken()
+	if _, ok := data[key]; !ok {
+		return "", "", false
+	}
+
+	goType = "unknown"
+	if se.GoType != nil {
+		goType = se.GoType.String()
+	}
+
+	return key, goType, true
+}
 
 type severity string
 
@@ -47,9 +148,10 @@ type reportLocation struct {
 }
 
 type context struct {
-	Data           map[string]any  `json:"data,omitempty"`
-	ReportLocation *reportLocation `json:"reportLocation,omitzero"`
-	HTTPRequest    map[string]any  `json:"httpRequest,omitempty"`
+	Data              map[string]any    `json:"data,omitempty"`
+	UnsupportedFields map[string]string `json:"unsupportedFields,omitempty"`
+	ReportLocation    *reportLocation   `json:"reportLocation,omitzero"`
+	HTTPRequest       map[string]any    `json:"httpRequest,omitempty"`
 }
 
 type entry struct {
@@ -175,15 +277,10 @@ func functionName(function string) string {
 func (f *Formatter) Format(e *logrus.Entry) ([]byte, error) {
 	severity := levelsToSeverity[e.Level]
 
+	// Copy the entry's fields because the code below deletes keys from data,
+	// and the entry itself must stay unchanged for hooks and other formatters.
 	data := make(map[string]any, len(e.Data))
-	for k, v := range e.Data {
-		switch t := v.(type) {
-		case error:
-			data[k] = t.Error()
-		default:
-			data[k] = v
-		}
-	}
+	maps.Copy(data, e.Data)
 
 	ee := entry{
 		Message:  e.Message,
@@ -234,10 +331,42 @@ func (f *Formatter) Format(e *logrus.Entry) ([]byte, error) {
 		}
 	}
 
-	b, err := json.Marshal(ee, json.Deterministic(true), jsontext.AllowInvalidUTF8(true))
-	if err != nil {
-		return nil, fmt.Errorf("marshal log entry: %w", err)
+	var err error
+	// One initial attempt plus up to maxUnsupportedFields retries.
+	for range maxUnsupportedFields + 1 {
+		var b []byte
+
+		b, err = json.Marshal(ee, marshalOptions)
+		if err != nil {
+			if handleSemanticError(err, &ee) {
+				continue
+			}
+			return nil, fmt.Errorf("marshal log entry: %w", err)
+		}
+
+		return append(b, '\n'), nil
+	}
+	return nil, fmt.Errorf("marshal log entry: more than %d unsupported fields: %w", maxUnsupportedFields, err)
+}
+
+// handleSemanticError moves the field that failed to marshal from ee's data to
+// its unsupported fields. It reports whether a field was dropped, in which case
+// the caller should retry marshaling.
+func handleSemanticError(err error, ee *entry) bool {
+	se, ok := errors.AsType[*json.SemanticError](err)
+	if !ok {
+		return false
 	}
 
-	return append(b, '\n'), nil
+	key, goType, ok := failingFieldFromSemanticError(se, ee.Context.Data)
+	if !ok {
+		return false
+	}
+
+	if ee.Context.UnsupportedFields == nil {
+		ee.Context.UnsupportedFields = make(map[string]string)
+	}
+	ee.Context.UnsupportedFields[key] = goType
+	delete(ee.Context.Data, key)
+	return true
 }
