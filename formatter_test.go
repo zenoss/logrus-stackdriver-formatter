@@ -5,9 +5,15 @@ import (
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"errors"
+	"fmt"
+	"math"
+	"math/big"
+	"net"
+	"net/netip"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"github.com/sirupsen/logrus"
@@ -220,4 +226,131 @@ func TestFormatterDeterministicKeys(t *testing.T) {
 			t.Fatalf("run %d output %q differs from %q", i, again, first)
 		}
 	}
+}
+
+type marshalPoint struct {
+	X int `json:"x"`
+	y int
+}
+
+func TestFormatterCommonTypes(t *testing.T) {
+	skipTimestamp = true
+
+	ts := time.Date(2024, time.March, 15, 10, 30, 0, 123456789, time.UTC)
+	kyiv := time.FixedZone("EET", 2*60*60)
+
+	tests := []struct {
+		name  string
+		value any
+		want  string
+	}{
+		{name: "time.Duration", value: 90 * time.Second, want: `90000000000`},
+		{name: "time.Duration zero", value: time.Duration(0), want: `0`},
+		{name: "time.Duration negative", value: -1500 * time.Millisecond, want: `-1500000000`},
+		{name: "*time.Duration", value: new(5 * time.Nanosecond), want: `5`},
+		{name: "*time.Duration nil", value: (*time.Duration)(nil), want: `null`},
+		{name: "[]time.Duration", value: []time.Duration{time.Second, time.Millisecond}, want: `[1000000000,1000000]`},
+		{name: "struct with time.Duration", value: struct {
+			Timeout time.Duration `json:"timeout"`
+		}{Timeout: time.Minute}, want: `{"timeout":60000000000}`},
+		{name: "time.Time UTC", value: ts, want: `"2024-03-15T10:30:00.123456789Z"`},
+		{name: "time.Time offset", value: ts.In(kyiv), want: `"2024-03-15T12:30:00.123456789+02:00"`},
+		{name: "time.Time zero", value: time.Time{}, want: `"0001-01-01T00:00:00Z"`},
+		{name: "*time.Time", value: &ts, want: `"2024-03-15T10:30:00.123456789Z"`},
+		{name: "*time.Time nil", value: (*time.Time)(nil), want: `null`},
+		{name: "time.Month", value: time.March, want: `3`},
+		{name: "time.Weekday", value: time.Friday, want: `5`},
+		{name: "string", value: "bar", want: `"bar"`},
+		{name: "bool", value: true, want: `true`},
+		{name: "int", value: -42, want: `-42`},
+		{name: "int64 max", value: int64(math.MaxInt64), want: `9223372036854775807`},
+		{name: "uint64 max", value: uint64(math.MaxUint64), want: `18446744073709551615`},
+		{name: "float64", value: 1.5, want: `1.5`},
+		{name: "float32", value: float32(0.25), want: `0.25`},
+		{name: "rune", value: 'x', want: `120`},
+		{name: "nil", value: nil, want: `null`},
+		{name: "[]byte", value: []byte("hi"), want: `"aGk="`},
+		{name: "[]string", value: []string{"a", "b"}, want: `["a","b"]`},
+		{name: "[]string nil", value: []string(nil), want: `[]`},
+		{name: "[2]int", value: [2]int{1, 2}, want: `[1,2]`},
+		{name: "map[string]int", value: map[string]int{"b": 2, "a": 1}, want: `{"a":1,"b":2}`},
+		{name: "map[string]int nil", value: map[string]int(nil), want: `{}`},
+		{name: "map[int]string", value: map[int]string{1: "a"}, want: `{"1":"a"}`},
+		{name: "struct", value: marshalPoint{X: 1, y: 2}, want: `{"x":1}`},
+		{name: "*struct nil", value: (*marshalPoint)(nil), want: `null`},
+		{name: "error", value: errors.New("boom"), want: `"boom"`},
+		{name: "wrapped error", value: fmt.Errorf("op: %w", errors.New("boom")), want: `"op: boom"`},
+		{name: "jsontext.Value", value: jsontext.Value(`{"a":1}`), want: `{"a":1}`},
+		{name: "net.IP", value: net.ParseIP("10.0.0.1"), want: `"10.0.0.1"`},
+		{name: "netip.Addr", value: netip.MustParseAddr("2001:db8::1"), want: `"2001:db8::1"`},
+		{name: "*big.Int", value: big.NewInt(42), want: `42`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := formatDataValue(t, tt.value)
+			if got != tt.want {
+				t.Errorf("context.data.v = %s; want %s", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFormatterUnsupportedTypes(t *testing.T) {
+	skipTimestamp = true
+
+	tests := []struct {
+		name  string
+		value any
+	}{
+		{name: "chan", value: make(chan int)},
+		{name: "func", value: func() {}},
+		{name: "complex128", value: complex(1, 2)},
+		{name: "NaN", value: math.NaN()},
+		{name: "+Inf", value: math.Inf(1)},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			b, err := NewFormatter().Format(&logrus.Entry{
+				Level:   logrus.InfoLevel,
+				Message: "unsupported",
+				Data:    logrus.Fields{"v": tt.value},
+			})
+			if err == nil {
+				t.Fatalf("Format() = %s; want an error", b)
+			}
+		})
+	}
+}
+
+// formatDataValue formats an info entry with value in the "v" field and
+// returns the raw JSON written for it under context.data.
+func formatDataValue(t *testing.T, value any) string {
+	t.Helper()
+
+	b, err := NewFormatter().Format(&logrus.Entry{
+		Level:   logrus.InfoLevel,
+		Message: "types",
+		Data:    logrus.Fields{"v": value},
+	})
+	if err != nil {
+		t.Fatalf("Format() error = %v", err)
+	}
+
+	var got struct {
+		Context struct {
+			Data map[string]jsontext.Value `json:"data"`
+		} `json:"context"`
+	}
+	err = json.Unmarshal(b, &got)
+	if err != nil {
+		t.Fatalf("unmarshal %q: %v", b, err)
+	}
+
+	v, ok := got.Context.Data["v"]
+	if !ok {
+		t.Fatalf("output %q has no context.data.v", b)
+	}
+	return string(v)
 }

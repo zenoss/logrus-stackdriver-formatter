@@ -1,6 +1,7 @@
 package stackdriver
 
 import (
+	jsonv1 "encoding/json"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"fmt"
@@ -14,6 +15,20 @@ import (
 )
 
 var skipTimestamp bool
+
+// marshalOptions are the encoding/json/v2 options used to write log entries.
+// Map keys are sorted so output is stable, and invalid UTF-8 is replaced
+// with U+FFFD instead of failing the entry.
+//
+// encoding/json/v2 has no default representation for time.Duration and
+// fails to marshal it, which would drop the whole log entry. Durations are
+// written as integer nanoseconds, as encoding/json (v1) did, so existing
+// log consumers keep working.
+var marshalOptions = json.JoinOptions(
+	json.Deterministic(true),
+	jsontext.AllowInvalidUTF8(true),
+	jsonv1.FormatDurationAsNano(true),
+)
 
 type severity string
 
@@ -234,7 +249,7 @@ func (f *Formatter) Format(e *logrus.Entry) ([]byte, error) {
 		}
 	}
 
-	b, err := json.Marshal(ee, json.Deterministic(true), jsontext.AllowInvalidUTF8(true))
+	b, err := json.Marshal(ee, marshalOptions)
 	if err != nil {
 		return nil, fmt.Errorf("marshal log entry: %w", err)
 	}
