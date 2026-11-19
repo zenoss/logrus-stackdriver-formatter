@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 	"unicode/utf8"
+	"unsafe"
 
 	"github.com/sirupsen/logrus"
 )
@@ -284,6 +285,14 @@ func TestFormatterCommonTypes(t *testing.T) {
 		{name: "net.IP", value: net.ParseIP("10.0.0.1"), want: `"10.0.0.1"`},
 		{name: "netip.Addr", value: netip.MustParseAddr("2001:db8::1"), want: `"2001:db8::1"`},
 		{name: "*big.Int", value: big.NewInt(42), want: `42`},
+		{name: "complex128", value: complex(1, 2), want: `"(1+2i)"`},
+		{name: "complex64", value: complex64(complex(1, 2)), want: `"(1+2i)"`},
+		{name: "float64 NaN", value: math.NaN(), want: `"NaN"`},
+		{name: "float64 +Inf", value: math.Inf(1), want: `"+Inf"`},
+		{name: "float64 -Inf", value: math.Inf(-1), want: `"-Inf"`},
+		{name: "float32 NaN", value: float32(math.NaN()), want: `"NaN"`},
+		{name: "float32 -Inf", value: float32(math.Inf(-1)), want: `"-Inf"`},
+		{name: "unsafe.Pointer nil", value: unsafe.Pointer(nil), want: `null`},
 	}
 
 	for _, tt := range tests {
@@ -296,32 +305,113 @@ func TestFormatterCommonTypes(t *testing.T) {
 	}
 }
 
+// TestFormatterUnsupportedTypes checks that a value encoding/json/v2 cannot
+// marshal is dropped, the rest of the record is still written, and the dropped
+// field is listed in unsupportedFields.
 func TestFormatterUnsupportedTypes(t *testing.T) {
 	skipTimestamp = true
 
 	tests := []struct {
-		name  string
-		value any
+		name     string
+		value    any
+		wantType string
 	}{
-		{name: "chan", value: make(chan int)},
-		{name: "func", value: func() {}},
-		{name: "complex128", value: complex(1, 2)},
-		{name: "NaN", value: math.NaN()},
-		{name: "+Inf", value: math.Inf(1)},
+		{name: "chan", value: make(chan int), wantType: "chan int"},
+		{name: "func", value: func() {}, wantType: "func()"},
+		{name: "struct with chan field", value: struct{ C chan int }{C: make(chan int)}, wantType: "chan int"},
+		{name: "struct with only unexported fields", value: struct{ y int }{y: 1}, wantType: "struct { y int }"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			b, err := NewFormatter().Format(&logrus.Entry{
-				Level:   logrus.InfoLevel,
-				Message: "unsupported",
-				Data:    logrus.Fields{"v": tt.value},
-			})
-			if err == nil {
-				t.Fatalf("Format() = %s; want an error", b)
+			got := formatRecord(t, logrus.Fields{"bad": tt.value, "ok": "fine"})
+
+			if _, ok := got.Context.Data["bad"]; ok {
+				t.Errorf("context.data.bad = %s; want it dropped", got.Context.Data["bad"])
+			}
+			if v := string(got.Context.Data["ok"]); v != `"fine"` {
+				t.Errorf("context.data.ok = %s; want %q", v, "fine")
+			}
+			if g := got.Context.UnsupportedFields["bad"]; g != tt.wantType {
+				t.Errorf("unsupportedFields.bad = %q; want %q", g, tt.wantType)
 			}
 		})
 	}
+}
+
+// TestFormatterUnsupportedFieldLimit checks that up to maxUnsupportedFields
+// fields are dropped, and a record with more unsupported fields fails.
+func TestFormatterUnsupportedFieldLimit(t *testing.T) {
+	skipTimestamp = true
+
+	fields := func(n int) logrus.Fields {
+		f := logrus.Fields{"ok": "fine"}
+		for i := range n {
+			f[fmt.Sprintf("bad%d", i)] = make(chan int)
+		}
+		return f
+	}
+
+	got := formatRecord(t, fields(maxUnsupportedFields))
+	if len(got.Context.UnsupportedFields) != maxUnsupportedFields {
+		t.Errorf("unsupportedFields has %d entries; want %d", len(got.Context.UnsupportedFields), maxUnsupportedFields)
+	}
+
+	_, err := NewFormatter().Format(&logrus.Entry{
+		Level:   logrus.InfoLevel,
+		Message: "too many",
+		Data:    fields(maxUnsupportedFields + 1),
+	})
+	if err == nil {
+		t.Fatalf("Format() with %d unsupported fields = nil error; want an error", maxUnsupportedFields+1)
+	}
+}
+
+// TestFormatterUnsupportedOutsideData checks that an unsupported value outside
+// the data fields still fails the record.
+func TestFormatterUnsupportedOutsideData(t *testing.T) {
+	skipTimestamp = true
+
+	_, err := NewFormatter().Format(&logrus.Entry{
+		Level:   logrus.ErrorLevel,
+		Message: "request",
+		Data: logrus.Fields{
+			"httpRequest": map[string]any{"bad": make(chan int)},
+		},
+	})
+	if err == nil {
+		t.Fatal("Format() = nil error; want an error for an unsupported httpRequest value")
+	}
+}
+
+// decodedRecord is the part of a formatted record the tests check.
+type decodedRecord struct {
+	Message string `json:"message"`
+	Context struct {
+		Data              map[string]jsontext.Value `json:"data"`
+		UnsupportedFields map[string]string         `json:"unsupportedFields"`
+	} `json:"context"`
+}
+
+// formatRecord formats an info entry with the given fields and decodes it.
+func formatRecord(t *testing.T, fields logrus.Fields) decodedRecord {
+	t.Helper()
+
+	b, err := NewFormatter().Format(&logrus.Entry{
+		Level:   logrus.InfoLevel,
+		Message: "record",
+		Data:    fields,
+	})
+	if err != nil {
+		t.Fatalf("Format() error = %v", err)
+	}
+
+	var got decodedRecord
+	err = json.Unmarshal(b, &got)
+	if err != nil {
+		t.Fatalf("unmarshal %q: %v", b, err)
+	}
+	return got
 }
 
 // formatDataValue formats an info entry with value in the "v" field and
@@ -353,4 +443,159 @@ func formatDataValue(t *testing.T, value any) string {
 		t.Fatalf("output %q has no context.data.v", b)
 	}
 	return string(v)
+}
+
+// TestFormatterNoExportedFields checks that errors and locations nested in a
+// value, which encoding/json/v2 cannot marshal as structs, are written by name
+// instead of dropping the log entry.
+func TestFormatterNoExportedFields(t *testing.T) {
+	skipTimestamp = true
+
+	tests := []struct {
+		name  string
+		value any
+		want  string
+	}{
+		{name: "[]error", value: []error{errors.New("a")}, want: `["a"]`},
+		{name: "[]error nil", value: []error(nil), want: `[]`},
+		{name: "struct with error field", value: struct {
+			Err error
+		}{Err: errors.New("a")}, want: `{"Err":"a"}`},
+		{name: "map[string]error", value: map[string]error{"k": errors.New("a")}, want: `{"k":"a"}`},
+		{name: "*time.Location", value: time.UTC, want: `"UTC"`},
+		{name: "empty struct", value: struct{}{}, want: `{}`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := formatDataValue(t, tt.value)
+			if got != tt.want {
+				t.Errorf("context.data.v = %s; want %s", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestFormatterNoExportedFieldsKeepsOtherFields checks that the other fields of
+// an entry are still written when one of them holds a nested error.
+func TestFormatterNoExportedFieldsKeepsOtherFields(t *testing.T) {
+	skipTimestamp = true
+
+	b, err := NewFormatter().Format(&logrus.Entry{
+		Level:   logrus.InfoLevel,
+		Message: "keep",
+		Data: logrus.Fields{
+			"bad":  []error{errors.New("a")},
+			"ok":   "fine",
+			"n":    42,
+			"when": time.Second,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Format() error = %v", err)
+	}
+
+	var got struct {
+		Message string `json:"message"`
+		Context struct {
+			Data map[string]jsontext.Value `json:"data"`
+		} `json:"context"`
+	}
+	err = json.Unmarshal(b, &got)
+	if err != nil {
+		t.Fatalf("unmarshal %q: %v", b, err)
+	}
+
+	want := map[string]string{
+		"bad":  `["a"]`,
+		"ok":   `"fine"`,
+		"n":    `42`,
+		"when": `1000000000`,
+	}
+	if got.Message != "keep" {
+		t.Errorf("message = %q; want %q", got.Message, "keep")
+	}
+	for k, w := range want {
+		if v := string(got.Context.Data[k]); v != w {
+			t.Errorf("context.data.%s = %s; want %s", k, v, w)
+		}
+	}
+}
+
+// TestFormatterErrorFieldInMessage checks that an error under the "error" key
+// is appended to the message and removed from the data.
+func TestFormatterErrorFieldInMessage(t *testing.T) {
+	skipTimestamp = true
+
+	b, err := NewFormatter().Format(&logrus.Entry{
+		Level:   logrus.ErrorLevel,
+		Message: "save failed",
+		Data:    logrus.Fields{"error": errors.New("boom"), "id": 7},
+	})
+	if err != nil {
+		t.Fatalf("Format() error = %v", err)
+	}
+
+	var got struct {
+		Message string `json:"message"`
+		Context struct {
+			Data map[string]jsontext.Value `json:"data"`
+		} `json:"context"`
+	}
+	err = json.Unmarshal(b, &got)
+	if err != nil {
+		t.Fatalf("unmarshal %q: %v", b, err)
+	}
+
+	if want := "save failed: boom"; got.Message != want {
+		t.Errorf("message = %q; want %q", got.Message, want)
+	}
+	if _, ok := got.Context.Data["error"]; ok {
+		t.Errorf("context.data still has the error field: %s", b)
+	}
+	if v := string(got.Context.Data["id"]); v != `7` {
+		t.Errorf("context.data.id = %s; want 7", v)
+	}
+}
+
+// TestFormatterDoesNotModifyEntryData checks that Format leaves the entry's
+// fields as they were, since hooks and other formatters read them too.
+func TestFormatterDoesNotModifyEntryData(t *testing.T) {
+	skipTimestamp = true
+
+	data := logrus.Fields{
+		"error":       errors.New("boom"),
+		"httpRequest": map[string]any{"method": "GET"},
+		"id":          7,
+	}
+	_, err := NewFormatter().Format(&logrus.Entry{
+		Level:   logrus.ErrorLevel,
+		Message: "save failed",
+		Data:    data,
+	})
+	if err != nil {
+		t.Fatalf("Format() error = %v", err)
+	}
+
+	if len(data) != 3 {
+		t.Errorf("entry data has %d fields after Format(); want 3: %v", len(data), data)
+	}
+}
+
+// TestFormatterUnsupportedFieldEscapedKey checks that a dropped field whose
+// name needs JSON Pointer escaping is reported under its real name.
+func TestFormatterUnsupportedFieldEscapedKey(t *testing.T) {
+	skipTimestamp = true
+
+	got := formatRecord(t, logrus.Fields{
+		"a/b~c": struct{ C chan int }{C: make(chan int)},
+		"ok":    "fine",
+	})
+
+	if _, ok := got.Context.Data["a/b~c"]; ok {
+		t.Errorf("context.data has the dropped field: %s", got.Context.Data["a/b~c"])
+	}
+	if g := got.Context.UnsupportedFields["a/b~c"]; g != "chan int" {
+		t.Errorf("unsupportedFields[%q] = %q; want %q", "a/b~c", g, "chan int")
+	}
 }
